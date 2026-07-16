@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "k3s-mcp-admin"
+version = "0.1.0"
+description = "K3s MCP Admin GUI -- web dashboard for managing the K3s MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp-admin-core",
+    "httpx",
+    "kubernetes>=28.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["k3s_mcp_admin"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]

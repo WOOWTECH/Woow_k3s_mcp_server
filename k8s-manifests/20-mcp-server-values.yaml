@@ -1,0 +1,45 @@
+# Helm values for kubernetes-mcp-server (WoowTech K3s)
+# Usage:
+#   helm upgrade -i kubernetes-mcp-server \
+#     oci://ghcr.io/containers/charts/kubernetes-mcp-server \
+#     -n mcp-system -f k8s-manifests/20-mcp-server-values.yaml
+
+# -- Phase 1: in-cluster mode, single cluster
+# -- Full permissions (test environment), no denied_resources
+
+ingress:
+  enabled: false   # 不對外，走 port-forward
+
+service:
+  type: ClusterIP
+  port: 8080
+
+serviceAccount:
+  create: true
+  name: kubernetes-mcp-viewer
+
+rbac:
+  create: true
+  extraClusterRoleBindings:
+    - name: mcp-full-access
+      roleRef:
+        name: cluster-admin
+        external: true    # 引用 K8s 內建 cluster-admin，測試環境全開
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# MCP Server config → 自動轉成 config.toml
+config:
+  port: "8080"
+  log_level: 2
+  confirmation_fallback: "allow"   # 當 client 不支援 elicitation 時直接放行
+  toolsets:
+    - core
+    - config
+    - helm
