@@ -347,7 +347,7 @@ kubectl -n mcp-helm create secret generic cf-secrets \
 
 | Value | 預設值 | 說明 |
 |-------|--------|------|
-| `namespace.name` | `mcp-helm` | Release 的 namespace（若等於 `--namespace` 則不 render） |
+| `namespace.name` | `""`（回退為 `.Release.Namespace`，也就是你下的 `-n`/`--namespace`） | 只有想讓 chart 物件落在跟 release 本身「不同」的 namespace 時才需要設它；維持預設才能讓一般的 `helm install ... -n <任意值>` 不用多加 `--set` 就正確運作 |
 | `keepOnUninstall` | `true` | 在管理介面 PVC、JWT Secret 上加 `helm.sh/resource-policy: keep` |
 | `storageClassName` | `local-path` | 管理介面 PVC 的預設 StorageClass |
 | `secrets.create` | `false` | `true` 時會從 `secrets.jwtSecret` render 出 `k3s-mcp-admin-secrets` |

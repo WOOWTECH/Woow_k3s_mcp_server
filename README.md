@@ -382,7 +382,7 @@ a real secret in it - see [`examples/secrets.example.yaml`](examples/secrets.exa
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `namespace.name` | `mcp-helm` | Release namespace (skipped if it equals `--namespace`) |
+| `namespace.name` | `""` (falls back to `.Release.Namespace`, i.e. whatever `-n`/`--namespace` you pass) | Only set this to make the chart's objects live in a namespace **different** from the release itself; leaving it at its default is what makes a plain `helm install ... -n <anything>` work with no extra `--set` |
 | `keepOnUninstall` | `true` | `helm.sh/resource-policy: keep` on the admin PVC and the JWT Secret |
 | `storageClassName` | `local-path` | Default StorageClass for the admin console's PVC |
 | `secrets.create` | `false` | `true` renders `k3s-mcp-admin-secrets` from `secrets.jwtSecret` |

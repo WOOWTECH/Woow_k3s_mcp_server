@@ -14,7 +14,17 @@ namespace:
   # release namespace (create it with `--create-namespace` in that case), so
   # `helm uninstall` can never delete the namespace the release lives in.
   create: true
-  name: mcp-helm
+  # "" (default): every namespaced object in this chart targets
+  # .Release.Namespace, exactly like any normal Helm chart - install with
+  # `-n <whatever>` and everything lands there, no extra flag needed.
+  # Only set this to a literal namespace when you deliberately want the
+  # chart's objects to live in a DIFFERENT namespace than the release
+  # metadata itself (rare - e.g. a shared/umbrella install). Leaving this
+  # non-empty while installing with a different `-n` is almost always a
+  # mistake: it silently targets the namespace named here instead of the
+  # one you passed to `-n`/`--namespace`, which can collide with an
+  # unrelated existing release in that namespace.
+  name: ""
 
 # Add `helm.sh/resource-policy: keep` to PVCs and chart-created Secrets, so
 # `helm uninstall` never deletes the admin console's data or a generated JWT
@@ -104,6 +114,12 @@ admin:
     #   podman push 192.168.2.253:5050/k3s-mcp-admin:latest
     repository: 192.168.2.253:5050/k3s-mcp-admin
     tag: latest
+    # Intended diff from k8s-manifests/30-mcp-admin.yaml (which used
+    # IfNotPresent): the repo's build path only ever produces the mutable
+    # "latest" tag (see repository above), so IfNotPresent would silently
+    # keep running whatever was pulled first and never pick up a rebuild.
+    # Always is the correct policy for a floating tag; it does not affect the
+    # local install today since admin.enabled=false there.
     pullPolicy: Always
   # Public URL the admin console advertises for the MCP endpoint (cosmetic;
   # shown in the UI, not used for routing).

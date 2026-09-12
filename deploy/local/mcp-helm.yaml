@@ -23,7 +23,8 @@
 
 namespace:
   create: true
-  name: mcp-helm
+  # name left unset - defaults to .Release.Namespace, i.e. whatever `-n` is
+  # passed at install time (mcp-helm per the command above).
 
 keepOnUninstall: true
 storageClassName: local-path

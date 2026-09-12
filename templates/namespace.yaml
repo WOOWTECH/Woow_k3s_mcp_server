@@ -3,12 +3,13 @@ Namespace. Skipped when it equals the release namespace: Helm keeps its
 release record there, so it is created with --create-namespace instead and
 can never be deleted by `helm uninstall`.
 */ -}}
-{{- if and .Values.namespace.create (ne .Values.namespace.name .Release.Namespace) }}
+{{- $ns := include "mcp-server.ns" . }}
+{{- if and .Values.namespace.create (ne $ns .Release.Namespace) }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace.name }}
+  name: {{ $ns }}
   labels:
     app.kubernetes.io/name: mcp-server
     {{- include "mcp-server.partOf" . | nindent 4 }}

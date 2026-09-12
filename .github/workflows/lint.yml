@@ -49,7 +49,49 @@ jobs:
           # The shape of the actual local install: own namespace, local-path storage, admin disabled.
           helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN",storageClassName=local-path,admin.enabled=false \
                                                                                                      > /tmp/r/test-install.yaml
+          # Genericity regression: -n deliberately NOT equal to any
+          # values.yaml default (there is none now, but this also guards
+          # against a future default reintroducing the bug) - a plain
+          # install with no namespace.name override must land in the
+          # namespace passed to -n, nothing else.
+          helm template mcp-helm . -n some-other-namespace --set proxy.token="$TOKEN" \
+                                                                                                     > /tmp/r/other-ns.yaml
+          # The deliberate opposite case: namespace.name explicitly set to a
+          # DIFFERENT namespace than -n/--namespace (the one scenario the
+          # values.yaml comment says is legitimate). This is the only
+          # combination that renders templates/namespace.yaml.
+          helm template mcp-helm . -n mcp-system --set proxy.token="$TOKEN",namespace.name=mcp-helm-other \
+                                                                                                     > /tmp/r/explicit-ns-override.yaml
           wc -l /tmp/r/*.yaml
+
+      - name: Chart is namespace-generic (installs wherever -n points, no override needed)
+        run: |
+          # Regression test for a real bug: values.yaml once shipped
+          # namespace.name as a concrete non-empty default, so every
+          # namespaced object ignored -n and always targeted that hardcoded
+          # namespace. Prove every namespaced object in /tmp/r/other-ns.yaml
+          # actually lives in "some-other-namespace" - with NO
+          # --set namespace.name override. (No Namespace object is expected
+          # here: namespace.name defaults to "" -> resolves to
+          # .Release.Namespace -> equals it -> namespace.yaml is skipped by
+          # design; that skip-when-equal behaviour has its own coverage in
+          # the "release namespace never rendered" step below.)
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import sys, yaml
+          bad = []
+          want = "some-other-namespace"
+          docs = [d for d in yaml.safe_load_all(open("/tmp/r/other-ns.yaml")) if d]
+          if not docs:
+              sys.exit("other-ns.yaml rendered nothing")
+          for d in docs:
+              ns = d.get("metadata", {}).get("namespace")
+              if ns is not None and ns != want:
+                  bad.append(f"{d['kind']}/{d['metadata']['name']} has namespace={ns!r}, want {want!r}")
+              if d["kind"] == "Namespace" and d["metadata"]["name"] != want:
+                  bad.append(f"Namespace object name={d['metadata']['name']!r}, want {want!r}")
+          sys.exit("\n".join(bad)) if bad else print(f"every namespaced object correctly targets -n {want}, no override needed")
+          EOF
 
       - name: Instance values render the same as the intended local release
         run: |
@@ -168,11 +210,13 @@ jobs:
           cd /tmp/freshclone
           helm dependency build .
           # Two renders, like the main job's combination matrix:
-          #  - -n mcp-system (not the default namespace.name "mcp-helm") so
-          #    templates/namespace.yaml also renders (it's skipped on purpose
-          #    when the namespace equals the release namespace).
+          #  - -n mcp-system with namespace.name explicitly set to a
+          #    different namespace, so templates/namespace.yaml also renders
+          #    (it's skipped on purpose when the namespace equals the
+          #    release namespace - namespace.name defaults to "" precisely
+          #    so a plain `-n <anything>` install does NOT need this).
           #  - secrets.create=true so templates/secrets.yaml also renders.
-          rendered="$(helm template mcp-helm . -n mcp-system --set proxy.token="$TOKEN" 2>/dev/null; helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS" 2>/dev/null)"
+          rendered="$(helm template mcp-helm . -n mcp-system --set proxy.token="$TOKEN",namespace.name=mcp-helm-other 2>/dev/null; helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS" 2>/dev/null)"
           for f in $(find templates -type f -name '*.yaml'); do
             echo "$rendered" | grep -q "^# Source: mcp-server/$f\$" \
               || { echo "::error::$f missing from a fresh clone's render"; exit 1; }
