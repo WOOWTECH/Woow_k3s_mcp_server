@@ -1,0 +1,27 @@
+# Patterns to ignore when building Helm packages.
+.DS_Store
+.git/
+.gitignore
+.github/
+.helmignore
+# Anchored to the repo root: an unanchored "*.tgz" also matches
+# charts/kubernetes-mcp-server-0.1.0.tgz and strips the vendored dependency
+# out of every `helm lint`/`helm template`/`helm install`, not just packaging.
+/*.tgz
+*.bak
+*.tmp
+*.swp
+.idea/
+.vscode/
+README*.md
+PLAN.md
+examples/
+scripts/
+docs/
+k3s-mcp-admin/
+init-cloudflare.py
+.env.example
+# Per-cluster instance values are passed with -f, never packaged.
+/deploy/
+# In-repo test suites (bash/playwright acceptance harness), not chart templates.
+/tests/

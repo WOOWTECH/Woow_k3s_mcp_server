@@ -1,0 +1,87 @@
+{{- /*
+`helm test` smoke pod, read-only:
+  1. GET  <proxy>/health                      -> 200 "ok"
+  2. POST <proxy>/private_<token>/mcp initialize -> 200, capture Mcp-Session-Id
+  3. POST <proxy>/private_<token>/mcp tools/list -> 200, non-empty tools[]
+  4. wrong token -> 403
+Exercises the real client path (nginx token proxy -> kubernetes-mcp-server),
+not the backend Service directly.
+*/ -}}
+{{- if .Values.tests.enabled }}
+{{- $token := required "proxy.token is required (generate: python3 -c \"import secrets; print(secrets.token_hex(16))\")" .Values.proxy.token }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-smoke
+  namespace: {{ include "mcp-server.ns" . }}
+  labels:
+    {{- include "mcp-server.partOf" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    # Kept until the next `helm test` so `helm test --logs` can always read it.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: curlimages/curl:8.11.1
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          BASE="http://mcp-k8s-proxy-svc:8001"
+          TOKEN_PATH="/private_${TOKEN}/mcp"
+
+          echo "1. GET /health"
+          code=$(curl -s -o /tmp/health -w '%{http_code}' "$BASE/health")
+          [ "$code" = "200" ] && grep -q '^ok$' /tmp/health || { echo "health check failed: $code $(cat /tmp/health)"; exit 1; }
+          echo "   ok"
+
+          echo "2. POST initialize (via token proxy)"
+          curl -s -D /tmp/init_headers -o /tmp/init_body \
+            -X POST "$BASE$TOKEN_PATH" \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream, application/json" \
+            --max-time 15 \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"helm-test","version":"1.0"}}}'
+          init_code=$(grep -i '^HTTP/' /tmp/init_headers | tail -1 | awk '{print $2}' | tr -d '\r')
+          session=$(grep -i 'mcp-session-id' /tmp/init_headers | tail -1 | sed 's/.*: *//' | tr -d '\r\n')
+          [ "$init_code" = "200" ] || { echo "initialize failed: $init_code $(cat /tmp/init_body)"; exit 1; }
+          echo "   ok (session=${session:-none})"
+
+          echo "3. POST tools/list (via token proxy)"
+          session_hdr=""
+          [ -n "$session" ] && session_hdr="Mcp-Session-Id: $session"
+          curl -s -D /tmp/list_headers -o /tmp/list_body \
+            -X POST "$BASE$TOKEN_PATH" \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream, application/json" \
+            ${session_hdr:+-H "$session_hdr"} \
+            --max-time 15 \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          list_code=$(grep -i '^HTTP/' /tmp/list_headers | tail -1 | awk '{print $2}' | tr -d '\r')
+          [ "$list_code" = "200" ] || { echo "tools/list failed: $list_code $(cat /tmp/list_body)"; exit 1; }
+          data=$(grep '^data: ' /tmp/list_body | sed 's/^data: //' | head -1)
+          [ -z "$data" ] && data=$(cat /tmp/list_body)
+          echo "$data" | grep -q '"tools"' || { echo "tools/list has no tools[]: $data"; exit 1; }
+          n=$(echo "$data" | grep -o '"name"' | wc -l)
+          echo "   ok ($n tools listed)"
+
+          echo "4. Wrong token is rejected"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/private_wrong0000000000000000000000000/mcp")
+          [ "$code" = "403" ] || { echo "wrong token should 403, got $code"; exit 1; }
+          echo "   ok"
+
+          echo "SMOKE OK"
+      env:
+        - name: TOKEN
+          value: {{ $token | quote }}
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 64Mi
+{{- end }}

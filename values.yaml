@@ -1,0 +1,142 @@
+# Default values for the mcp-server chart.
+# Covers 3 components in one release:
+#   1. kubernetes-mcp-server - the upstream chart (dependency, values below
+#      mirror k8s-manifests/20-mcp-server-values.yaml).
+#   2. proxy                 - token-authenticated nginx reverse proxy in
+#      front of it (was k8s-manifests/21-mcp-proxy.yaml).
+#   3. admin                 - the k3s-mcp-admin console (was
+#      k8s-manifests/30-mcp-admin.yaml).
+# Cloudflare Tunnel is intentionally NOT part of this chart - route the proxy
+# Service through your own tunnel/ingress; never bake a tunnel token in here.
+
+namespace:
+  # Render a Namespace object. Skipped automatically when it equals the
+  # release namespace (create it with `--create-namespace` in that case), so
+  # `helm uninstall` can never delete the namespace the release lives in.
+  create: true
+  # "" (default): every namespaced object in this chart targets
+  # .Release.Namespace, exactly like any normal Helm chart - install with
+  # `-n <whatever>` and everything lands there, no extra flag needed.
+  # Only set this to a literal namespace when you deliberately want the
+  # chart's objects to live in a DIFFERENT namespace than the release
+  # metadata itself (rare - e.g. a shared/umbrella install). Leaving this
+  # non-empty while installing with a different `-n` is almost always a
+  # mistake: it silently targets the namespace named here instead of the
+  # one you passed to `-n`/`--namespace`, which can collide with an
+  # unrelated existing release in that namespace.
+  name: ""
+
+# Add `helm.sh/resource-policy: keep` to PVCs and chart-created Secrets, so
+# `helm uninstall` never deletes the admin console's data or a generated JWT
+# signing key.
+keepOnUninstall: true
+
+# Default StorageClass for the admin console's PVC. local-path on a single-node
+# K3s cluster; use longhorn-delete on woow-k3s test installs.
+storageClassName: local-path
+
+secrets:
+  # false (default): the Secret k3s-mcp-admin-secrets (JWT signing key) already
+  #   exists out of band, and this chart never renders or touches it.
+  # true: render it from secrets.jwtSecret below (fresh installs, tests).
+  create: false
+  # Signs the admin console's session JWTs. Generate with:
+  #   python3 -c "import secrets; print(secrets.token_hex(32))"
+  jwtSecret: ""
+
+# kubernetes-mcp-server: values for the upstream chart dependency. Kept
+# equivalent to k8s-manifests/20-mcp-server-values.yaml - do not add anything
+# here that changes its runtime image or command.
+kubernetes-mcp-server:
+  enabled: true
+  ingress:
+    enabled: false # not exposed directly; the proxy below fronts it
+  service:
+    type: ClusterIP
+    port: 8080
+  serviceAccount:
+    create: true
+    name: kubernetes-mcp-viewer
+  rbac:
+    create: true
+    # Named "mcp-full-access": the upstream chart renders the
+    # ClusterRoleBinding as "<release-name>-kubernetes-mcp-server-mcp-full-access",
+    # so it never collides with the legacy mcp-system release's
+    # "kubernetes-mcp-server-mcp-full-access".
+    extraClusterRoleBindings:
+      - name: mcp-full-access
+        roleRef:
+          name: cluster-admin
+          external: true # built-in K8s ClusterRole, test environment full access
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  config:
+    port: "8080"
+    log_level: 2
+    confirmation_fallback: allow # client without elicitation support: allow through
+    toolsets:
+      - core
+      - config
+      - helm
+
+# nginx token-authenticated proxy in front of the MCP server.
+proxy:
+  image:
+    repository: nginx
+    tag: alpine
+  # REQUIRED, no default: the token embedded in the proxy's nginx.conf
+  # (matches the URL path /private_<token>/mcp). Not a Kubernetes Secret in
+  # this design - it must be baked into the served nginx config - so it is
+  # never given a real or weak default here.
+  #   Generate: python3 -c "import secrets; print(secrets.token_hex(16))"
+  token: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# k3s-mcp-admin console.
+admin:
+  enabled: true
+  image:
+    # Built from k3s-mcp-admin/Dockerfile, pushed to WOOWTECH's LAN registry -
+    # the repo's current build path (the old ttl.sh:2h image referenced in an
+    # earlier deploy has long expired). Build & push:
+    #   podman build -t 192.168.2.253:5050/k3s-mcp-admin:latest k3s-mcp-admin/
+    #   podman push 192.168.2.253:5050/k3s-mcp-admin:latest
+    repository: 192.168.2.253:5050/k3s-mcp-admin
+    tag: latest
+    # Intended diff from k8s-manifests/30-mcp-admin.yaml (which used
+    # IfNotPresent): the repo's build path only ever produces the mutable
+    # "latest" tag (see repository above), so IfNotPresent would silently
+    # keep running whatever was pulled first and never pick up a rebuild.
+    # Always is the correct policy for a floating tag; it does not affect the
+    # local install today since admin.enabled=false there.
+    pullPolicy: Always
+  # Public URL the admin console advertises for the MCP endpoint (cosmetic;
+  # shown in the UI, not used for routing).
+  externalUrl: "https://k8s-mcp.woowtech.io"
+  storage:
+    # "" = use storageClassName
+    className: ""
+    size: 100Mi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+tests:
+  # `helm test` smoke pod: proxy /health, then a real tools/list call through
+  # the token proxy. Read-only.
+  enabled: true

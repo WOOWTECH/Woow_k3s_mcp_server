@@ -15,7 +15,19 @@ package-lock.json
 # Environment & Secrets
 .env
 .env.local
+.env.*
+*.env
 cf-config.json
+# Real secrets must never be committed - only examples/secrets.example.yaml.
+# Anchored to the repo root (leading /) on purpose: an unanchored "secrets.yaml"
+# would also match templates/secrets.yaml and keep the chart's own Secret
+# template out of git.
+/secrets.yaml
+/*-secrets.yaml
+/*.secret.yaml
+/*secrets.values.yaml
+/*.local.yaml
+!/templates/secrets.yaml
 
 # Test artifacts
 test-results/
@@ -33,3 +45,7 @@ Thumbs.db
 # Build artifacts
 *.tar
 *.gz
+
+# Helm dependency cache - run `helm dependency build` to (re)fetch.
+# Chart.lock IS committed for reproducibility.
+/charts/*.tgz

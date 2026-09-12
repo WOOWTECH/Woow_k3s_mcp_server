@@ -1,22 +1,26 @@
-# K3s MCP Admin GUI
-# Web management interface for kubernetes-mcp-server
-# Provides: Dashboard, Tool Manager, Token Manager, Log Viewer, Cluster Overview, Settings
-
+{{- /*
+k3s-mcp-admin console. Was k8s-manifests/30-mcp-admin.yaml.
+The ClusterRole/ClusterRoleBinding names are release-derived
+(mcp-server.adminClusterRoleName/BindingName) because they are cluster-scoped:
+a second fixed-name "k3s-mcp-admin-role"/"k3s-mcp-admin-binding" would collide
+with the legacy mcp-system install's objects of the same name.
+*/ -}}
+{{- if .Values.admin.enabled }}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: k3s-mcp-admin-sa
-  namespace: mcp-system
+  namespace: {{ include "mcp-server.ns" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
-    app.kubernetes.io/part-of: kubernetes-mcp-server
+    {{- include "mcp-server.partOf" . | nindent 4 }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: k3s-mcp-admin-role
+  name: {{ include "mcp-server.adminClusterRoleName" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
 rules:
@@ -41,48 +45,40 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: k3s-mcp-admin-binding
+  name: {{ include "mcp-server.adminClusterRoleBindingName" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
 subjects:
   - kind: ServiceAccount
     name: k3s-mcp-admin-sa
-    namespace: mcp-system
+    namespace: {{ include "mcp-server.ns" . }}
 roleRef:
   kind: ClusterRole
-  name: k3s-mcp-admin-role
+  name: {{ include "mcp-server.adminClusterRoleName" . }}
   apiGroup: rbac.authorization.k8s.io
-
-# The k3s-mcp-admin-secrets Secret is intentionally NOT defined here with a
-# checked-in value (an earlier revision shipped a fixed "PLACEHOLDER_..."
-# jwt-secret, which is exactly the kind of committed placeholder credential
-# this repo now avoids). Create it out of band before applying this file:
-#   kubectl -n mcp-system create secret generic k3s-mcp-admin-secrets \
-#     --from-literal=jwt-secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-# See examples/secrets.example.yaml. The Helm chart at the repo root
-# (values: secrets.create) covers the same Secret for the `mcp-helm` install.
 
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: k3s-mcp-admin-data
-  namespace: mcp-system
+  namespace: {{ include "mcp-server.ns" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
+  {{- include "mcp-server.keepAnnotations" . | nindent 2 }}
 spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 100Mi
-  storageClassName: local-path
+      storage: {{ .Values.admin.storage.size }}
+  storageClassName: {{ include "mcp-server.storageClass" (list . .Values.admin.storage.className) }}
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: k3s-mcp-admin
-  namespace: mcp-system
+  namespace: {{ include "mcp-server.ns" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
     app.kubernetes.io/part-of: kubernetes-mcp-server
@@ -100,31 +96,26 @@ spec:
       serviceAccountName: k3s-mcp-admin-sa
       containers:
         - name: admin
-          image: your-registry/k3s-mcp-admin:latest  # Replace with your image
-          imagePullPolicy: IfNotPresent
+          image: "{{ .Values.admin.image.repository }}:{{ .Values.admin.image.tag }}"
+          imagePullPolicy: {{ .Values.admin.image.pullPolicy }}
           ports:
             - containerPort: 9001
               name: http
           env:
             - name: NAMESPACE
-              value: "mcp-system"
+              value: {{ include "mcp-server.ns" . | quote }}
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: k3s-mcp-admin-secrets
                   key: jwt-secret
             - name: MCP_EXTERNAL_URL
-              value: "https://your-k8s-mcp.example.com"  # Replace with your MCP URL
+              value: {{ .Values.admin.externalUrl | quote }}
           volumeMounts:
             - name: data
               mountPath: /data
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
+            {{- toYaml .Values.admin.resources | nindent 12 }}
           startupProbe:
             httpGet:
               path: /healthz
@@ -156,7 +147,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: k3s-mcp-admin-svc
-  namespace: mcp-system
+  namespace: {{ include "mcp-server.ns" . }}
   labels:
     app.kubernetes.io/name: k3s-mcp-admin
     app.kubernetes.io/part-of: kubernetes-mcp-server
@@ -168,3 +159,4 @@ spec:
     - name: http
       port: 9001
       targetPort: 9001
+{{- end }}
