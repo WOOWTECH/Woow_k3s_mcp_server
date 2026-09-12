@@ -172,8 +172,7 @@ jobs:
           #    templates/namespace.yaml also renders (it's skipped on purpose
           #    when the namespace equals the release namespace).
           #  - secrets.create=true so templates/secrets.yaml also renders.
-          rendered="$(helm template mcp-helm . -n mcp-system --set proxy.token="$TOKEN" 2>/dev/null)
-$(helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS" 2>/dev/null)"
+          rendered="$(helm template mcp-helm . -n mcp-system --set proxy.token="$TOKEN" 2>/dev/null; helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS" 2>/dev/null)"
           for f in $(find templates -type f -name '*.yaml'); do
             echo "$rendered" | grep -q "^# Source: mcp-server/$f\$" \
               || { echo "::error::$f missing from a fresh clone's render"; exit 1; }
