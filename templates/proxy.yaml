@@ -1,0 +1,137 @@
+{{- /*
+Token-authenticated nginx reverse proxy in front of the kubernetes-mcp-server
+Service. Was k8s-manifests/21-mcp-proxy.yaml. proxy.token has no default (see
+values.yaml) - it is required so no real or placeholder token is ever
+committed.
+Client URL: https://{your-hostname}/private_{proxy.token}/mcp
+*/ -}}
+{{- $token := required "proxy.token is required (generate: python3 -c \"import secrets; print(secrets.token_hex(16))\")" .Values.proxy.token }}
+{{- /* Hyphenated key: not addressable as .Values.kubernetes-mcp-server (Go
+   template parses that as subtraction), so look it up with `index`. */ -}}
+{{- $mcpValues := index .Values "kubernetes-mcp-server" }}
+{{- $mcpSvc := include "mcp-server.mcpServiceName" . }}
+{{- $mcpPort := $mcpValues.service.port }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-k8s-proxy-config
+  namespace: {{ include "mcp-server.ns" . }}
+  labels:
+    app.kubernetes.io/name: mcp-k8s-proxy
+    {{- include "mcp-server.partOf" . | nindent 4 }}
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+    http {
+      server {
+        listen 8001;
+
+        # Health check for K8s probes
+        location /health {
+          return 200 'ok';
+          add_header Content-Type text/plain;
+        }
+
+        # Token-authenticated MCP proxy
+        location /private_{{ $token }}/ {
+          rewrite ^/private_{{ $token }}/(.*) /$1 break;
+          proxy_pass http://{{ $mcpSvc }}:{{ $mcpPort }};
+          proxy_set_header Host localhost;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_http_version 1.1;
+          proxy_set_header Connection '';
+          proxy_buffering off;
+          proxy_cache off;
+          chunked_transfer_encoding off;
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+        }
+
+        # Deny all other paths
+        location / {
+          return 403;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-k8s-proxy
+  namespace: {{ include "mcp-server.ns" . }}
+  labels:
+    app.kubernetes.io/name: mcp-k8s-proxy
+    app.kubernetes.io/part-of: kubernetes-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-k8s-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-k8s-proxy
+        app.kubernetes.io/part-of: kubernetes-mcp-server
+      annotations:
+        checksum/config: {{ .Values.proxy | toYaml | sha256sum }}
+    spec:
+      containers:
+        - name: proxy
+          image: "{{ .Values.proxy.image.repository }}:{{ .Values.proxy.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+              name: proxy-http
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: mcp-k8s-proxy-config
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-k8s-proxy-svc
+  namespace: {{ include "mcp-server.ns" . }}
+  labels:
+    app.kubernetes.io/name: mcp-k8s-proxy
+    app.kubernetes.io/part-of: kubernetes-mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mcp-k8s-proxy
+  ports:
+    - name: proxy
+      port: 8001
+      targetPort: 8001

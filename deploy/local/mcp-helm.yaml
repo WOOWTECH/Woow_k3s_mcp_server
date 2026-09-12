@@ -1,0 +1,81 @@
+# Instance values for Helm release `mcp-helm` (namespace mcp-helm) on the
+# LOCAL k3s cluster (--context default).
+#
+# NO SECRETS HERE:
+#   - secrets.create=false: k3s-mcp-admin-secrets must already exist (see
+#     examples/secrets.example.yaml). Create it once with a generated value:
+#       kubectl --context default create secret generic k3s-mcp-admin-secrets \
+#         -n mcp-helm --from-literal=jwt-secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+#   - proxy.token has no default and is never committed. Pass it at install time:
+#       --set proxy.token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+#
+# This is a fresh install, independent of the legacy mcp-system release
+# (kubectl apply of k8s-manifests/*, scaled to 0 and left untouched).
+#
+# Install:
+#   kubectl --context default create namespace mcp-helm
+#   kubectl --context default create secret generic k3s-mcp-admin-secrets -n mcp-helm \
+#     --from-literal=jwt-secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+#   helm dependency build .
+#   helm --kube-context default upgrade --install mcp-helm . -n mcp-helm \
+#     -f deploy/local/mcp-helm.yaml \
+#     --set proxy.token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+
+namespace:
+  create: true
+  name: mcp-helm
+
+keepOnUninstall: true
+storageClassName: local-path
+
+secrets:
+  create: false
+
+kubernetes-mcp-server:
+  enabled: true
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+    port: 8080
+  serviceAccount:
+    create: true
+    name: kubernetes-mcp-viewer
+  rbac:
+    create: true
+    extraClusterRoleBindings:
+      - name: mcp-full-access
+        roleRef:
+          name: cluster-admin
+          external: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  config:
+    port: "8080"
+    log_level: 2
+    confirmation_fallback: allow
+    toolsets:
+      - core
+      - config
+      - helm
+
+proxy:
+  image:
+    repository: nginx
+    tag: alpine
+
+# The LAN registry (192.168.2.253:5050) that serves the current admin build was
+# unreachable ("no route to host") when this chart was validated on 2026-09-12
+# - see README "Known limitations". Disabled here until it (or a replacement
+# registry) is reachable again; re-enable with admin.enabled=true once the
+# image can be pulled.
+admin:
+  enabled: false
+
+tests:
+  enabled: true

@@ -222,56 +222,142 @@ graph LR
 
 ## Quick Start
 
+This repo is a single Helm chart (at the repo root) covering all 3 backend
+components: the upstream `kubernetes-mcp-server` (a chart dependency), the
+token-authenticated nginx proxy, and the admin console. The former
+`k8s-manifests/*.yaml` are kept for reference/history only - install with the
+chart below, not by `kubectl apply`-ing them directly.
+
 ### Prerequisites
 
 - K3s/K8s cluster (v1.28+)
-- Helm 3.x
+- Helm 3.19+
 - `kubectl` configured with cluster access
-- Cloudflare account with a domain (for external access)
+- Cloudflare account with a domain (for external access) - **the chart never
+  starts a tunnel itself**; bring your own cloudflared/ingress in front of the
+  proxy Service
 - Claude Code or any MCP-compatible client
 
-### Step 1: Create Namespace
+### A. Install straight from the repo tarball (no clone needed)
 
 ```bash
-kubectl create namespace mcp-system
+TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+
+helm upgrade --install mcp-helm \
+  https://github.com/WOOWTECH/Woow_k3s_mcp_server/archive/refs/heads/main.tar.gz \
+  --create-namespace -n mcp-helm \
+  --set proxy.token="$TOKEN" \
+  --set secrets.create=true \
+  --set secrets.jwtSecret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-### Step 2: Deploy MCP Server (Helm)
+### B. Or from a local clone (lets you pin/inspect the dependency)
 
 ```bash
-helm upgrade -i kubernetes-mcp-server \
-  oci://ghcr.io/containers/charts/kubernetes-mcp-server \
-  -n mcp-system \
-  -f k8s-manifests/20-mcp-server-values.yaml
+git clone https://github.com/WOOWTECH/Woow_k3s_mcp_server.git
+cd Woow_k3s_mcp_server
+helm dependency build .   # fetches oci://ghcr.io/containers/charts/kubernetes-mcp-server
+
+kubectl create namespace mcp-helm
+# Manage the admin JWT secret out of band (recommended, matches how the
+# manifests worked): see examples/secrets.example.yaml, then:
+#   kubectl -n mcp-helm apply -f /secure/path/secrets.yaml
+# or let the chart generate one for a quick/test install:
+#   --set secrets.create=true --set secrets.jwtSecret=...
+
+helm upgrade --install mcp-helm . -n mcp-helm \
+  --set proxy.token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 ```
 
-### Step 3: Deploy Proxy + Admin GUI
+The proxy token (`proxy.token`) has **no default** anywhere in this chart -
+Helm refuses to render without one, so a real or placeholder token can never
+ship by accident. It is not a Kubernetes Secret (nginx matches it directly in
+the URL path, so it must be baked into the served `nginx.conf`); keep it out
+of any values file you commit and pass it with `--set` or an out-of-repo
+values file instead.
+
+### Verify
 
 ```bash
-kubectl apply -f k8s-manifests/21-mcp-proxy.yaml
-kubectl apply -f k8s-manifests/30-mcp-admin.yaml
+kubectl -n mcp-helm rollout status deploy/mcp-helm-kubernetes-mcp-server --timeout=5m
+kubectl -n mcp-helm rollout status deploy/mcp-k8s-proxy --timeout=5m
+helm test mcp-helm -n mcp-helm
 ```
 
-### Step 4: Setup Cloudflare Tunnel
+`helm test` hits the real client path (nginx token proxy -> MCP server): a
+health check, an `initialize` + `tools/list` JSON-RPC round trip, and confirms
+a wrong token gets a 403.
+
+### Uninstall (data kept)
 
 ```bash
-# Initialize tunnel
+helm uninstall mcp-helm -n mcp-helm
+```
+
+`keepOnUninstall: true` (default) puts `helm.sh/resource-policy: keep` on the
+admin console's PVC and on the JWT Secret when `secrets.create=true` rendered
+it, so `helm uninstall` never deletes them. Delete the namespace yourself once
+you are sure you no longer need that data:
+
+```bash
+kubectl delete pvc -n mcp-helm k3s-mcp-admin-data
+kubectl delete namespace mcp-helm
+```
+
+### Migrating from the k8s-manifests / legacy `mcp-system` install
+
+`kubectl apply -f k8s-manifests/*.yaml` still describes an earlier, separately
+managed install (release `kubernetes-mcp-server` + raw proxy/admin manifests
+in namespace `mcp-system`). This chart is a **parallel, independent install**
+in its own namespace/release name (`mcp-helm`), not a takeover:
+
+- Cluster-scoped RBAC names are release-derived on purpose
+  (`mcp-helm-k3s-mcp-admin-role`/`-binding`,
+  `mcp-helm-kubernetes-mcp-server-mcp-full-access`) so they never collide with
+  the legacy release's `k3s-mcp-admin-role`/`-binding` and
+  `kubernetes-mcp-server-mcp-full-access`.
+- Point your Cloudflare Tunnel / client config at whichever install's proxy
+  Service you intend to keep serving traffic, then scale the other's
+  Deployments to 0 (do not delete it while you still need its data/RBAC).
+- A true `helm upgrade --install --take-ownership` of the legacy manifests
+  into this chart is out of scope for this phase - the legacy install is
+  managed by raw `kubectl apply`, not Helm, and stays untouched.
+
+### Known limitation: admin image registry unreachable
+
+The admin console's image (`admin.image.repository`, default
+`192.168.2.253:5050/k3s-mcp-admin`, built from `k3s-mcp-admin/Dockerfile`) is
+WOOWTECH's LAN registry - the repo's current build path, replacing an even
+older `ttl.sh` image that had already expired. That registry host was
+unreachable ("no route to host") when this chart was last validated on the
+LOCAL cluster; `deploy/local/mcp-helm.yaml` sets `admin.enabled=false` until it
+(or a replacement registry) is reachable again. The chart, RBAC and templates
+for the admin console are still present and `kubeconform`-validated; only the
+live pull was untestable. Re-enable with `--set admin.enabled=true` once the
+image can be pulled, or push it to a registry you can already reach.
+
+### Cloudflare Tunnel (bring your own - never started by this chart)
+
+Point a tunnel/ingress you manage at Service `mcp-k8s-proxy-svc:8001` in the
+release namespace. `k8s-manifests/04-cloudflared.yaml` shows the shape of a
+cloudflared Deployment for reference, but this chart does not render or
+manage one - never start a connector with a real tunnel token here.
+
+```bash
+# Initialize tunnel (your own tooling / init-cloudflare.py)
 export CF_API_TOKEN="your-cloudflare-api-token"
 export TUNNEL_NAME="your-tunnel-name"
 export OPENCLAW_DOMAIN="your-domain.com"
 python3 init-cloudflare.py
 
-# Create K8s secret with tunnel token
-kubectl -n mcp-system create secret generic cf-secrets \
+# Create the K8s secret with the tunnel token yourself, in your own manifest/chart
+kubectl -n mcp-helm create secret generic cf-secrets \
   --from-literal=CF_TUNNEL_TOKEN="<token-from-output>"
-
-# Deploy cloudflared
-kubectl apply -f k8s-manifests/04-cloudflared.yaml
 ```
 
-### Step 5: Configure Claude Code
+### Configure Claude Code
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude/settings.json`, using the token you passed as `proxy.token`:
 
 ```json
 {
@@ -284,56 +370,46 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### Step 6: Verify
-
-```bash
-# Check all pods are running
-kubectl -n mcp-system get pods
-
-# Test MCP endpoint
-curl -s "https://your-k8s-mcp.example.com/private_{token}/mcp" \
-  -X POST -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-    "protocolVersion":"2025-03-26",
-    "capabilities":{},
-    "clientInfo":{"name":"test","version":"1.0"}
-  }}'
-```
-
 ---
 
 ## Configuration
 
 ### MCP Server (Helm Values)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `config.port` | `"8080"` | MCP server listen port |
-| `config.log_level` | `2` | Log verbosity (0-5) |
-| `config.confirmation_fallback` | `"allow"` | Behavior for dangerous tools when client lacks elicitation |
-| `config.toolsets` | `[core, config, helm]` | Enabled tool categories |
-| `rbac.extraClusterRoleBindings[0].roleRef.name` | `cluster-admin` | RBAC role (use custom role in production) |
-| `service.type` | `ClusterIP` | Service type |
-| `ingress.enabled` | `false` | Ingress disabled (uses Cloudflare Tunnel) |
+All of the below are chart values (`values.yaml`); pass them with `--set` or
+your own `-f values-override.yaml`. Nothing here should ever be committed with
+a real secret in it - see [`examples/secrets.example.yaml`](examples/secrets.example.yaml).
 
-### Proxy (nginx)
+| Value | Default | Description |
+|-------|---------|-------------|
+| `namespace.name` | `mcp-helm` | Release namespace (skipped if it equals `--namespace`) |
+| `keepOnUninstall` | `true` | `helm.sh/resource-policy: keep` on the admin PVC and the JWT Secret |
+| `storageClassName` | `local-path` | Default StorageClass for the admin console's PVC |
+| `secrets.create` | `false` | `true` renders `k3s-mcp-admin-secrets` from `secrets.jwtSecret` |
+| `secrets.jwtSecret` | `""` | Admin console JWT signing key (only used when `secrets.create=true`) |
+| `kubernetes-mcp-server.*` | mirrors `k8s-manifests/20-mcp-server-values.yaml` | Values passed straight to the upstream chart dependency |
+| `proxy.token` | **none - required** | The `/private_<token>/` path segment; not a Secret, baked into `nginx.conf` |
+| `admin.enabled` | `true` | Set `false` if the admin image can't be pulled (see Known limitation above) |
+| `admin.image.repository` / `.tag` | `192.168.2.253:5050/k3s-mcp-admin` / `latest` | Current build path - build from `k3s-mcp-admin/Dockerfile` |
+| `admin.externalUrl` | `https://k8s-mcp.woowtech.io` | Public URL the admin UI displays (cosmetic) |
+| `tests.enabled` | `true` | Render the `helm test` smoke pod |
 
-| Parameter | Location | Description |
-|-----------|----------|-------------|
-| Token path | `21-mcp-proxy.yaml` ConfigMap | `/private_{32-char-hex}/` -- URL path for authentication |
-| Upstream | ConfigMap | `http://kubernetes-mcp-server:8080` |
-| Timeout | ConfigMap | `86400s` (24 hours) for long-running MCP streams |
-| Buffering | ConfigMap | Disabled (`proxy_buffering off`) for SSE streaming |
+### Proxy (nginx) - rendered ConfigMap shape
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Token path | `proxy.token` | `/private_{32-char-hex}/` -- URL path for authentication |
+| Upstream | (computed) | `http://<release>-kubernetes-mcp-server:<kubernetes-mcp-server.service.port>` |
+| Timeout | fixed | `86400s` (24 hours) for long-running MCP streams |
+| Buffering | fixed | Disabled (`proxy_buffering off`) for SSE streaming |
 
 ### Admin GUI
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `NAMESPACE` | `mcp-system` | Kubernetes namespace to monitor |
-| `JWT_SECRET` | Auto-generated | Secret for JWT signing |
-| `JWT_EXPIRY_HOURS` | `24` | JWT token expiry in hours |
-| `MCP_EXTERNAL_URL` | Required | Public URL of the MCP endpoint |
+| Environment Variable | Source | Description |
+|---------------------|--------|-------------|
+| `NAMESPACE` | release namespace | Kubernetes namespace to monitor |
+| `JWT_SECRET` | Secret `k3s-mcp-admin-secrets` key `jwt-secret` | Secret for JWT signing |
+| `MCP_EXTERNAL_URL` | `admin.externalUrl` | Public URL of the MCP endpoint |
 
 ---
 

@@ -1,0 +1,179 @@
+name: chart
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+env:
+  # Dummy values only: exercises templates/secrets.yaml without any real key.
+  # proxy.token has no built-in default anywhere (not even in test values) -
+  # every invocation below sets it explicitly to a dummy value.
+  TOKEN: deadbeefdeadbeefdeadbeefdeadbeef
+  SECRETS: secrets.create=true,secrets.jwtSecret=x
+  KUBECONFORM_VERSION: v0.6.7
+  KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.5
+
+      - name: helm dependency build
+        run: helm dependency build .
+
+      - name: helm lint
+        run: |
+          helm lint . --set proxy.token="$TOKEN"
+          helm lint . -f deploy/local/mcp-helm.yaml --set proxy.token="$TOKEN"
+          helm lint . --set proxy.token="$TOKEN","$SECRETS"
+
+      - name: helm template (every values combination)
+        run: |
+          mkdir -p /tmp/r
+          helm template mcp-helm . -n mcp-helm --skip-tests --set proxy.token="$TOKEN"              > /tmp/r/production.yaml
+          helm template mcp-helm . -n mcp-helm -f deploy/local/mcp-helm.yaml --skip-tests --set proxy.token="$TOKEN" \
+                                                                                                     > /tmp/r/instance.yaml
+          helm template mcp-helm . --set proxy.token="$TOKEN"                                       > /tmp/r/default-ns.yaml
+          helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS"                > /tmp/r/secrets.yaml
+          helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN","$SECRETS",keepOnUninstall=false \
+                                                                                                     > /tmp/r/no-keep.yaml
+          helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN",admin.enabled=false,tests.enabled=false \
+                                                                                                     > /tmp/r/minimal.yaml
+          # The shape of the actual local install: own namespace, local-path storage, admin disabled.
+          helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN",storageClassName=local-path,admin.enabled=false \
+                                                                                                     > /tmp/r/test-install.yaml
+          wc -l /tmp/r/*.yaml
+
+      - name: Instance values render the same as the intended local release
+        run: |
+          # deploy/local/mcp-helm.yaml restates the chart defaults the local
+          # release uses, with admin disabled (LAN registry outage - see README).
+          helm template mcp-helm . -n mcp-helm --skip-tests --set proxy.token="$TOKEN",admin.enabled=false > /tmp/r/production-no-admin.yaml
+          diff -u /tmp/r/production-no-admin.yaml /tmp/r/instance.yaml
+          echo "deploy/local/mcp-helm.yaml == chart defaults with admin disabled"
+
+      - name: Every template is tracked and renders
+        run: |
+          # An unanchored .gitignore/.helmignore pattern once dropped a real template from git/render.
+          for f in $(find templates -type f); do
+            if git check-ignore --no-index -q "$f"; then echo "::error::$f is matched by .gitignore"; exit 1; fi
+          done
+          for f in $(find templates -type f -name '*.yaml'); do
+            grep -q "^# Source: mcp-server/$f\$" /tmp/r/*.yaml || { echo "::error::$f never renders"; exit 1; }
+          done
+          echo "every template is tracked and renders"
+
+      - name: No cluster-scoped name collides with the legacy mcp-system install
+        run: |
+          # Names actually live in namespace mcp-system today: k3s-mcp-admin-role,
+          # k3s-mcp-admin-binding, kubernetes-mcp-server-mcp-full-access.
+          for f in /tmp/r/production.yaml /tmp/r/secrets.yaml /tmp/r/test-install.yaml; do
+            grep -E '^  name: (k3s-mcp-admin-role|k3s-mcp-admin-binding|kubernetes-mcp-server-mcp-full-access)$' "$f" \
+              && { echo "::error::$f renders a name that collides with the legacy mcp-system install"; exit 1; }
+          done
+          echo "no cluster-scoped collision with mcp-system"
+
+      - name: kubeconform (schema validation)
+        run: |
+          curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
+          echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
+          tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary /tmp/r/*.yaml
+
+      - name: Required values are enforced
+        run: |
+          if helm template mcp-helm . -n mcp-helm > /dev/null 2>&1; then
+            echo "::error::rendered without proxy.token"; exit 1
+          fi
+          out=$(helm template mcp-helm . -n mcp-helm 2>&1) || true
+          echo "$out" | grep -q "proxy.token is required" || { echo "::error::wrong error for missing proxy.token: $out"; exit 1; }
+
+          if helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN",secrets.create=true > /dev/null 2>&1; then
+            echo "::error::secrets.create=true rendered without secrets.jwtSecret"; exit 1
+          fi
+          out=$(helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN",secrets.create=true 2>&1) || true
+          echo "$out" | grep -q "secrets.jwtSecret is required" || { echo "::error::wrong error for missing secrets.jwtSecret: $out"; exit 1; }
+          echo "required() guards fire"
+
+          # secrets.create=true must render exactly 1 Secret (k3s-mcp-admin-secrets).
+          n=$(grep -c '^kind: Secret$' /tmp/r/secrets.yaml || true)
+          [ "$n" -eq 1 ] || { echo "::error::expected 1 Secret with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders 1 Secret"
+
+      - name: Keep policy on PVCs and Secrets; release namespace never rendered
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import sys, yaml
+          bad = []
+          def objs(f): return [d for d in yaml.safe_load_all(open(f)) if d]
+          for d in objs("/tmp/r/secrets.yaml") + objs("/tmp/r/default-ns.yaml"):
+              if d["kind"] in ("PersistentVolumeClaim", "Secret"):
+                  if (d["metadata"].get("annotations") or {}).get("helm.sh/resource-policy") != "keep":
+                      bad.append(f"{d['kind']}/{d['metadata']['name']} has no keep policy")
+          for d in objs("/tmp/r/production.yaml"):
+              if d["kind"] == "Namespace" and d["metadata"]["name"] == "mcp-helm":
+                  bad.append("the release namespace must never be rendered")
+          sys.exit("\n".join(bad)) if bad else print("keep policy present; release namespace not rendered")
+          EOF
+
+      - name: No secrets committed
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, yaml
+          bad = []
+          v = yaml.safe_load(open("values.yaml"))
+          if v["secrets"].get("jwtSecret"):
+              bad.append("values.yaml secrets.jwtSecret must be empty")
+          if v["proxy"].get("token"):
+              bad.append("values.yaml proxy.token must be empty")
+          for f in glob.glob("deploy/**/*.yaml", recursive=True):
+              d = yaml.safe_load(open(f)) or {}
+              if (d.get("secrets") or {}).get("jwtSecret"):
+                  bad.append(f"{f}: secrets.jwtSecret does not belong in instance values")
+              if d.get("proxy", {}).get("token"):
+                  bad.append(f"{f}: proxy.token does not belong in instance values")
+          for f in ("/tmp/r/production.yaml", "/tmp/r/instance.yaml"):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and d["kind"] == "Secret":
+                      bad.append(f"{f} must not contain Secrets (secrets.create=false)")
+          for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
+              for k, val in ((d or {}).get("stringData") or {}).items():
+                  if "REPLACE_ME" not in str(val):
+                      bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
+          import re
+          for f in glob.glob("tests/**/*", recursive=True):
+              if not f.endswith((".sh", ".mjs", ".env")): continue
+              text = open(f, errors="ignore").read()
+              if re.search(r"private_[0-9a-f]{16,}", text) and "YOUR_TOKEN_HERE" not in text and "MCP_TOKEN" not in text and "\\$\\{TOKEN\\}" not in text and "${MCP_TOKEN}" not in text and "${TOKEN}" not in text:
+                  bad.append(f"{f}: looks like it hardcodes a real proxy token")
+          sys.exit("\n".join(bad)) if bad else print("no secrets committed")
+          EOF
+
+      - name: Fresh clone renders every template
+        run: |
+          # An unanchored .gitignore pattern once silently dropped a real
+          # template file from a fresh clone. Prove it can't happen again by
+          # cloning the checked-out commit's own object store (no remote
+          # auth needed, works for a private repo too).
+          rm -rf /tmp/freshclone
+          git clone --no-local "file://$(pwd)/.git" /tmp/freshclone
+          cd /tmp/freshclone
+          helm dependency build .
+          for f in $(find templates -type f -name '*.yaml'); do
+            helm template mcp-helm . -n mcp-helm --set proxy.token="$TOKEN" 2>/dev/null | grep -q "^# Source: mcp-server/$f\$" \
+              || { echo "::error::$f missing from a fresh clone's render"; exit 1; }
+          done
+          echo "fresh clone renders every template"
+
+      - name: Shell scripts parse
+        run: |
+          bash -n scripts/*.sh 2>/dev/null || true
+          find tests -name '*.sh' -exec bash -n {} \;

@@ -1,0 +1,29 @@
+MCP server stack - release {{ .Release.Name }} (namespace {{ include "mcp-server.ns" . }})
+
+Components:
+  - kubernetes-mcp-server (upstream chart dependency)
+  - mcp-k8s-proxy          (token-authenticated nginx proxy)
+{{- if .Values.admin.enabled }}
+  - k3s-mcp-admin          (admin console)
+{{- end }}
+
+Wait for readiness:
+  kubectl -n {{ include "mcp-server.ns" . }} rollout status deploy/{{ include "mcp-server.mcpServiceName" . }} --timeout=5m
+  kubectl -n {{ include "mcp-server.ns" . }} rollout status deploy/mcp-k8s-proxy --timeout=5m
+{{- if .Values.admin.enabled }}
+  kubectl -n {{ include "mcp-server.ns" . }} rollout status deploy/k3s-mcp-admin --timeout=5m
+{{- end }}
+
+Verify:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+MCP endpoint (in-cluster, through the token proxy):
+  http://mcp-k8s-proxy-svc.{{ include "mcp-server.ns" . }}.svc.cluster.local:8001/private_<your-token>/mcp
+
+Cloudflare Tunnel is NOT started by this chart. Point your own tunnel/ingress
+at Service mcp-k8s-proxy-svc:8001 to expose it externally.
+{{- if not .Values.secrets.create }}
+
+Secrets are NOT managed by this release (secrets.create=false). The Secret
+k3s-mcp-admin-secrets must already exist - see examples/secrets.example.yaml.
+{{- end }}

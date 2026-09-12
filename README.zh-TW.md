@@ -194,56 +194,137 @@ sequenceDiagram
 
 ## 快速開始
 
+本專案是一個放在 repo 根目錄的單一 Helm chart，涵蓋後端全部 3 個元件：上游
+`kubernetes-mcp-server`（chart dependency）、有 token 認證的 nginx proxy，以及
+管理介面。舊的 `k8s-manifests/*.yaml` 僅保留作參考／歷史紀錄 -- 請用下方的
+chart 安裝，不要直接 `kubectl apply` 那些檔案。
+
 ### 前置條件
 
 - K3s/K8s 叢集（v1.28+）
-- Helm 3.x
+- Helm 3.19+
 - 已設定 `kubectl` 叢集存取權限
-- Cloudflare 帳號及網域（外部存取用）
+- Cloudflare 帳號及網域（外部存取用）-- **這個 chart 本身永遠不會啟動
+  tunnel**，請自行在 proxy Service 前面接上你自己的 cloudflared/ingress
 - Claude Code 或任何相容 MCP 的用戶端
 
-### 步驟 1：建立命名空間
+### A. 直接從 repo tarball 安裝（免 clone）
 
 ```bash
-kubectl create namespace mcp-system
+TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+
+helm upgrade --install mcp-helm \
+  https://github.com/WOOWTECH/Woow_k3s_mcp_server/archive/refs/heads/main.tar.gz \
+  --create-namespace -n mcp-helm \
+  --set proxy.token="$TOKEN" \
+  --set secrets.create=true \
+  --set secrets.jwtSecret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-### 步驟 2：部署 MCP Server（Helm）
+### B. 或先 clone 到本機（可以先檢查/固定 dependency 版本）
 
 ```bash
-helm upgrade -i kubernetes-mcp-server \
-  oci://ghcr.io/containers/charts/kubernetes-mcp-server \
-  -n mcp-system \
-  -f k8s-manifests/20-mcp-server-values.yaml
+git clone https://github.com/WOOWTECH/Woow_k3s_mcp_server.git
+cd Woow_k3s_mcp_server
+helm dependency build .   # 抓取 oci://ghcr.io/containers/charts/kubernetes-mcp-server
+
+kubectl create namespace mcp-helm
+# 建議在 Helm 之外自行管理 admin 的 JWT secret（跟舊 manifests 的做法一致）：
+# 參考 examples/secrets.example.yaml，然後：
+#   kubectl -n mcp-helm apply -f /secure/path/secrets.yaml
+# 或是想快速／測試安裝，讓 chart 自己產生：
+#   --set secrets.create=true --set secrets.jwtSecret=...
+
+helm upgrade --install mcp-helm . -n mcp-helm \
+  --set proxy.token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 ```
 
-### 步驟 3：部署 Proxy + 管理介面
+`proxy.token` 在這個 chart 裡**沒有任何預設值** -- 沒給值 Helm 會直接拒絕
+render，所以真實或佔位用的 token 都不可能不小心被打包進去。它也不是
+Kubernetes Secret（nginx 是直接在 URL 路徑裡比對它，所以一定得烤進實際送出的
+`nginx.conf`）：不要把它放進任何會 commit 的 values 檔，改用 `--set` 或放在
+repo 外的 values 檔。
+
+### 驗證
 
 ```bash
-kubectl apply -f k8s-manifests/21-mcp-proxy.yaml
-kubectl apply -f k8s-manifests/30-mcp-admin.yaml
+kubectl -n mcp-helm rollout status deploy/mcp-helm-kubernetes-mcp-server --timeout=5m
+kubectl -n mcp-helm rollout status deploy/mcp-k8s-proxy --timeout=5m
+helm test mcp-helm -n mcp-helm
 ```
 
-### 步驟 4：設定 Cloudflare Tunnel
+`helm test` 會走真實的用戶端路徑（nginx token proxy -> MCP server）：健康檢查、
+一次完整的 `initialize` + `tools/list` JSON-RPC 往返，並確認錯誤 token 會被
+擋 403。
+
+### 解除安裝（保留資料）
 
 ```bash
-# 初始化隧道
+helm uninstall mcp-helm -n mcp-helm
+```
+
+`keepOnUninstall: true`（預設）會在管理介面的 PVC，以及 `secrets.create=true`
+時 render 出來的 JWT Secret 上加上 `helm.sh/resource-policy: keep`，所以
+`helm uninstall` 永遠不會刪掉它們。確定不再需要那些資料後，再自行刪除：
+
+```bash
+kubectl delete pvc -n mcp-helm k3s-mcp-admin-data
+kubectl delete namespace mcp-helm
+```
+
+### 從 k8s-manifests／舊版 `mcp-system` 安裝遷移
+
+`kubectl apply -f k8s-manifests/*.yaml` 描述的是另一套獨立管理的舊安裝
+（release `kubernetes-mcp-server` + 手動 apply 的 proxy/admin manifests，在
+`mcp-system` namespace）。這個 chart 是**平行、獨立**的安裝，用自己的
+namespace／release 名稱（`mcp-helm`），不是接管：
+
+- 叢集層級的 RBAC 名稱刻意採用 release 衍生命名
+  （`mcp-helm-k3s-mcp-admin-role`／`-binding`、
+  `mcp-helm-kubernetes-mcp-server-mcp-full-access`），所以永遠不會跟舊 release
+  的 `k3s-mcp-admin-role`／`-binding` 及
+  `kubernetes-mcp-server-mcp-full-access` 撞名。
+- 把 Cloudflare Tunnel／用戶端設定指向你要保留服務的那一套安裝的 proxy
+  Service，再把另一套的 Deployment 縮到 0（在還需要它的資料／RBAC 之前不要
+  直接刪除）。
+- 把舊 manifests 真正 `helm upgrade --install --take-ownership` 進這個 chart
+  不在本階段範圍內 -- 舊安裝是用原生 `kubectl apply` 管理，不是 Helm，維持
+  原樣不動。
+
+### 已知限制：管理介面映像檔的私有 registry 目前連不上
+
+管理介面的映像檔（`admin.image.repository`，預設
+`192.168.2.253:5050/k3s-mcp-admin`，由 `k3s-mcp-admin/Dockerfile` build 出來）
+放在 WOOWTECH 內部 LAN 的私有 registry -- 這是目前實際在用的 build 路徑，取代
+更早、已經過期的 `ttl.sh` 映像檔。這次在 LOCAL 叢集驗證這個 chart 時，該
+registry 主機連不上（"no route to host"）；`deploy/local/mcp-helm.yaml` 因此
+先設 `admin.enabled=false`，等該 registry（或替代方案）恢復可連線再打開。
+管理介面的 chart、RBAC、template 都已備妥並通過 `kubeconform` 驗證，只是這次
+沒能實際驗證 image pull；registry 恢復後用 `--set admin.enabled=true`
+重新啟用即可，或是先把映像檔推到你目前連得到的 registry。
+
+### Cloudflare Tunnel（自備，這個 chart 不會啟動它）
+
+請把你自己管理的 tunnel／ingress 指向 release namespace 底下的
+`mcp-k8s-proxy-svc:8001`。`k8s-manifests/04-cloudflared.yaml` 只是示範
+cloudflared Deployment 的樣子作為參考，這個 chart 不會 render 或管理它 --
+千萬不要在這裡帶入真的 tunnel token 去啟動連接器。
+
+```bash
+# 初始化隧道（你自己的工具／init-cloudflare.py）
 export CF_API_TOKEN="your-cloudflare-api-token"
 export TUNNEL_NAME="your-tunnel-name"
 export OPENCLAW_DOMAIN="your-domain.com"
 python3 init-cloudflare.py
 
-# 建立 K8s Secret 存放隧道 Token
-kubectl -n mcp-system create secret generic cf-secrets \
+# 自行在你自己的 manifest/chart 裡建立存放隧道 Token 的 K8s Secret
+kubectl -n mcp-helm create secret generic cf-secrets \
   --from-literal=CF_TUNNEL_TOKEN="<上述輸出的 token>"
-
-# 部署 cloudflared
-kubectl apply -f k8s-manifests/04-cloudflared.yaml
 ```
 
-### 步驟 5：設定 Claude Code
+### 設定 Claude Code
 
-新增至 `~/.claude/settings.json`：
+新增至 `~/.claude/settings.json`，token 就用你傳給 `proxy.token` 的那個值：
 
 ```json
 {
@@ -256,56 +337,44 @@ kubectl apply -f k8s-manifests/04-cloudflared.yaml
 }
 ```
 
-### 步驟 6：驗證
-
-```bash
-# 確認所有 Pod 正在運行
-kubectl -n mcp-system get pods
-
-# 測試 MCP 端點
-curl -s "https://your-k8s-mcp.example.com/private_{token}/mcp" \
-  -X POST -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-    "protocolVersion":"2025-03-26",
-    "capabilities":{},
-    "clientInfo":{"name":"test","version":"1.0"}
-  }}'
-```
-
 ---
 
 ## 設定
 
-### MCP Server（Helm Values）
+以下全部都是 chart values（`values.yaml`）；用 `--set` 或自己的
+`-f values-override.yaml` 傳入即可。這裡任何一項都不該被 commit 進真的機密值
+-- 參考 [`examples/secrets.example.yaml`](examples/secrets.example.yaml)。
 
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `config.port` | `"8080"` | MCP Server 監聽埠 |
-| `config.log_level` | `2` | 日誌詳細程度（0-5） |
-| `config.confirmation_fallback` | `"allow"` | 用戶端不支援 elicitation 時的危險工具行為 |
-| `config.toolsets` | `[core, config, helm]` | 啟用的工具類別 |
-| `rbac.extraClusterRoleBindings[0].roleRef.name` | `cluster-admin` | RBAC 角色（正式環境請使用自訂角色） |
-| `service.type` | `ClusterIP` | 服務類型 |
-| `ingress.enabled` | `false` | 停用 Ingress（使用 Cloudflare Tunnel） |
+| Value | 預設值 | 說明 |
+|-------|--------|------|
+| `namespace.name` | `mcp-helm` | Release 的 namespace（若等於 `--namespace` 則不 render） |
+| `keepOnUninstall` | `true` | 在管理介面 PVC、JWT Secret 上加 `helm.sh/resource-policy: keep` |
+| `storageClassName` | `local-path` | 管理介面 PVC 的預設 StorageClass |
+| `secrets.create` | `false` | `true` 時會從 `secrets.jwtSecret` render 出 `k3s-mcp-admin-secrets` |
+| `secrets.jwtSecret` | `""` | 管理介面 JWT 簽章金鑰（只有 `secrets.create=true` 才會用到） |
+| `kubernetes-mcp-server.*` | 對應 `k8s-manifests/20-mcp-server-values.yaml` | 直接傳給上游 chart dependency 的值 |
+| `proxy.token` | **無 -- 必填** | `/private_<token>/` 那段路徑；不是 Secret，會被烤進 `nginx.conf` |
+| `admin.enabled` | `true` | 管理介面映像檔拉不下來時設 `false`（見上方「已知限制」） |
+| `admin.image.repository` / `.tag` | `192.168.2.253:5050/k3s-mcp-admin` / `latest` | 目前的 build 路徑 -- 由 `k3s-mcp-admin/Dockerfile` build 出來 |
+| `admin.externalUrl` | `https://k8s-mcp.woowtech.io` | 管理介面顯示的公開 URL（僅供顯示） |
+| `tests.enabled` | `true` | 是否 render `helm test` smoke pod |
 
-### Proxy（nginx）
+### Proxy（nginx）-- render 出來的 ConfigMap 樣貌
 
-| 參數 | 位置 | 說明 |
+| 參數 | 來源 | 說明 |
 |------|------|------|
-| Token 路徑 | `21-mcp-proxy.yaml` ConfigMap | `/private_{32字元hex}/` -- URL 路徑認證 |
-| 上游 | ConfigMap | `http://kubernetes-mcp-server:8080` |
-| 逾時 | ConfigMap | `86400s`（24 小時），支援長時間 MCP 串流 |
-| 緩衝 | ConfigMap | 停用（`proxy_buffering off`），支援 SSE 串流 |
+| Token 路徑 | `proxy.token` | `/private_{32字元hex}/` -- URL 路徑認證 |
+| 上游 | （自動計算） | `http://<release>-kubernetes-mcp-server:<kubernetes-mcp-server.service.port>` |
+| 逾時 | 固定值 | `86400s`（24 小時），支援長時間 MCP 串流 |
+| 緩衝 | 固定值 | 停用（`proxy_buffering off`），支援 SSE 串流 |
 
 ### 管理介面
 
-| 環境變數 | 預設值 | 說明 |
-|----------|--------|------|
-| `NAMESPACE` | `mcp-system` | 監控的 Kubernetes 命名空間 |
-| `JWT_SECRET` | 自動產生 | JWT 簽章金鑰 |
-| `JWT_EXPIRY_HOURS` | `24` | JWT Token 過期時間（小時） |
-| `MCP_EXTERNAL_URL` | 必填 | MCP 端點的公開 URL |
+| 環境變數 | 來源 | 說明 |
+|----------|------|------|
+| `NAMESPACE` | release namespace | 監控的 Kubernetes 命名空間 |
+| `JWT_SECRET` | Secret `k3s-mcp-admin-secrets` 的 `jwt-secret` 欄位 | JWT 簽章金鑰 |
+| `MCP_EXTERNAL_URL` | `admin.externalUrl` | MCP 端點的公開 URL |
 
 ---
 

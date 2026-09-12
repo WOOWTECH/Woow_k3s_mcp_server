@@ -1,0 +1,38 @@
+apiVersion: v2
+name: mcp-server
+description: >-
+  WOOWTECH K3s MCP server stack: the upstream kubernetes-mcp-server (chart
+  dependency, unmodified image/config model), a token-authenticated nginx
+  proxy for external access, and an admin console (Dashboard, Token Manager,
+  Tool Manager, Log Viewer) for managing tokens and tools. Cloudflare Tunnel
+  is documented but never started by this chart - route it yourself.
+type: application
+version: 0.1.0
+appVersion: "0.0.65"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - mcp
+  - kubernetes
+  - k3s
+  - model-context-protocol
+home: https://github.com/WOOWTECH/Woow_k3s_mcp_server
+sources:
+  - https://github.com/WOOWTECH/Woow_k3s_mcp_server
+  - https://github.com/containers/kubernetes-mcp-server
+maintainers:
+  - name: WoowTech
+    url: https://github.com/WOOWTECH
+dependencies:
+  - name: kubernetes-mcp-server
+    version: "0.1.0"
+    # `helm dependency build` appends the chart name itself, so the base path
+    # here must NOT repeat "kubernetes-mcp-server" (that doubles the path and
+    # 403s): the resolved ref is oci://ghcr.io/containers/charts/kubernetes-mcp-server.
+    repository: "oci://ghcr.io/containers/charts"
+    # No alias on purpose: an alias renames .Chart.Name inside the subchart,
+    # which changes every "helm.sh/chart"/"app.kubernetes.io/name" label and
+    # the ConfigMap/ClusterRoleBinding name suffix it renders - a needless
+    # difference from a plain `helm install kubernetes-mcp-server oci://...`.
+    # values.yaml therefore nests its values under the hyphenated key
+    # "kubernetes-mcp-server:" (accessed in templates via `index .Values`).
+    condition: kubernetes-mcp-server.enabled

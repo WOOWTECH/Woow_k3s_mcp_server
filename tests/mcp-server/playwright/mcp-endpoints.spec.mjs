@@ -1,8 +1,14 @@
 import { test, expect } from '@playwright/test';
 
 // Use external HTTPS URL (browser can't reach ClusterIP)
-const TOKEN_PATH = '/private_35badd6f564f405edf4b25b50cf3a88e';
-const EXTERNAL_HOST = 'https://k8s-mcp.woowtech.io';
+// Set MCP_TOKEN before running this spec - never hardcode a real token here.
+//   export MCP_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+const MCP_TOKEN = process.env.MCP_TOKEN;
+if (!MCP_TOKEN) {
+  throw new Error('MCP_TOKEN env var is required (see comment above)');
+}
+const TOKEN_PATH = `/private_${MCP_TOKEN}`;
+const EXTERNAL_HOST = process.env.MCP_EXTERNAL_HOST || 'https://k8s-mcp.woowtech.io';
 const BASE_URL = `${EXTERNAL_HOST}${TOKEN_PATH}`;
 
 test.describe('MCP HTTP Endpoints - Browser Context', () => {
