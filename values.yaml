@@ -113,6 +113,11 @@ admin:
     #   podman build -t 192.168.2.253:5050/k3s-mcp-admin:latest k3s-mcp-admin/
     #   podman push 192.168.2.253:5050/k3s-mcp-admin:latest
     repository: 192.168.2.253:5050/k3s-mcp-admin
+    # Pull secrets for the registry above. Empty by default: the original
+    # registry is an insecure in-cluster mirror that needs no auth. Set it
+    # when pointing admin.image at an authenticated registry, e.g.
+    #   pullSecrets: [{name: jfrog-registry}]
+    pullSecrets: []
     tag: latest
     # Intended diff from k8s-manifests/30-mcp-admin.yaml (which used
     # IfNotPresent): the repo's build path only ever produces the mutable
