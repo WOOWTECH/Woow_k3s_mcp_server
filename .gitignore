@@ -32,7 +32,12 @@ cf-config.json
 # Test artifacts
 test-results/
 playwright-report/
-*.html
+# Anchored to the report directories on purpose. A bare `*.html` is unanchored
+# and matched k3s-mcp-admin/frontend/index.html - Vite's entry point - so the
+# frontend could never build from a fresh clone and the image could not be
+# rebuilt at all. (Same class as the `!/templates/secrets.yaml` exception above.)
+/test-results/**/*.html
+/playwright-report/**/*.html
 
 # IDE
 .vscode/
