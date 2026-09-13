@@ -93,6 +93,14 @@ spec:
         app.kubernetes.io/name: k3s-mcp-admin
         app.kubernetes.io/part-of: kubernetes-mcp-server
     spec:
+      {{- with .Values.admin.image.pullSecrets }}
+      # Needed whenever admin.image lives in a registry that requires auth. The
+      # original value points at an insecure in-cluster mirror declared in the
+      # node's registries.yaml, so no secret was ever required and the chart had
+      # no way to express one - which blocked deploying it to any other cluster.
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: k3s-mcp-admin-sa
       containers:
         - name: admin
